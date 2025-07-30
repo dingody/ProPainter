@@ -79,7 +79,7 @@ def read_video_with_opencv(video_path):
 
 
 def create_text_mask(image, text_boxes, dilation_kernel_size=5, margin=10):
-    """Create mask from OCR text detection results"""
+    """Create mask from OCR text detection results with robust error handling"""
     # Convert PIL image to numpy array
     if isinstance(image, Image.Image):
         img_array = np.array(image)
@@ -97,36 +97,86 @@ def create_text_mask(image, text_boxes, dilation_kernel_size=5, margin=10):
         if box is None:
             continue
             
-        # Extract coordinates from box format
-        if len(box) >= 4:
-            # box format: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-            points = box
-            if isinstance(points[0], (list, tuple, np.ndarray)):
-                # Flatten coordinates and add margin
-                coords = []
-                for point in points:
-                    coords.extend([max(0, point[0] - margin), max(0, point[1] - margin)])
-                
-                # Also add margin to opposite corners
-                coords_with_margin = []
-                for i in range(0, len(coords), 2):
-                    x, y = coords[i], coords[i+1]
-                    coords_with_margin.extend([
-                        max(0, min(width-1, x)), 
-                        max(0, min(height-1, y))
-                    ])
-                
-                # Draw filled polygon
-                if len(coords_with_margin) >= 6:  # At least 3 points
-                    draw.polygon(coords_with_margin, fill=255)
+        try:
+            # Extract coordinates from box format with robust parsing
+            if len(box) >= 4:
+                # box format: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+                points = box
+                if isinstance(points[0], (list, tuple, np.ndarray)):
+                    # Flatten coordinates and add margin
+                    coords = []
+                    for point in points[:4]:  # Only use first 4 points
+                        if len(point) >= 2:
+                            x, y = float(point[0]), float(point[1])
+                            # Apply margin and clamp to image bounds
+                            x = max(0, min(width-1, x - margin))
+                            y = max(0, min(height-1, y - margin))
+                            coords.extend([x, y])
+                    
+                    # Draw filled polygon if we have enough coordinates
+                    if len(coords) >= 8:  # At least 4 points (8 coordinates)
+                        try:
+                            draw.polygon(coords, fill=255)
+                        except Exception as e:
+                            # If polygon fails, try drawing a bounding rectangle
+                            try:
+                                x_coords = coords[0::2]
+                                y_coords = coords[1::2]
+                                min_x, max_x = min(x_coords), max(x_coords)
+                                min_y, max_y = min(y_coords), max(y_coords)
+                                
+                                # Add additional margin for rectangle
+                                min_x = max(0, min_x - margin)
+                                min_y = max(0, min_y - margin)
+                                max_x = min(width-1, max_x + margin)
+                                max_y = min(height-1, max_y + margin)
+                                
+                                draw.rectangle([min_x, min_y, max_x, max_y], fill=255)
+                            except Exception:
+                                continue
+                else:
+                    # Points might be in flat format [x1, y1, x2, y2, ...]
+                    if len(points) >= 8:
+                        coords = []
+                        for i in range(0, min(8, len(points)), 2):
+                            if i + 1 < len(points):
+                                x, y = float(points[i]), float(points[i+1])
+                                # Apply margin and clamp to image bounds
+                                x = max(0, min(width-1, x - margin))
+                                y = max(0, min(height-1, y - margin))
+                                coords.extend([x, y])
+                        
+                        if len(coords) >= 8:
+                            try:
+                                draw.polygon(coords, fill=255)
+                            except Exception:
+                                # Fallback to bounding rectangle
+                                x_coords = coords[0::2]
+                                y_coords = coords[1::2]
+                                min_x, max_x = min(x_coords), max(x_coords)
+                                min_y, max_y = min(y_coords), max(y_coords)
+                                
+                                min_x = max(0, min_x - margin)
+                                min_y = max(0, min_y - margin)
+                                max_x = min(width-1, max_x + margin)
+                                max_y = min(height-1, max_y + margin)
+                                
+                                draw.rectangle([min_x, min_y, max_x, max_y], fill=255)
+        except Exception as e:
+            # Skip problematic boxes but continue processing
+            print(f"Warning: Failed to draw text box: {e}")
+            continue
     
     # Convert to numpy array for dilation
     mask_array = np.array(mask)
     
     # Apply dilation to expand text regions
     if dilation_kernel_size > 0:
-        kernel = np.ones((dilation_kernel_size, dilation_kernel_size), np.uint8)
-        mask_array = cv2.dilate(mask_array, kernel, iterations=1)
+        try:
+            kernel = np.ones((dilation_kernel_size, dilation_kernel_size), np.uint8)
+            mask_array = cv2.dilate(mask_array, kernel, iterations=1)
+        except Exception as e:
+            print(f"Warning: Dilation failed: {e}")
     
     return mask_array
 
