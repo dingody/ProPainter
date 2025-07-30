@@ -97,8 +97,8 @@ def read_mask(mpath, length, size, flow_mask_dilates=8, mask_dilates=5):
         else:
             flow_mask_img = binary_mask(mask_img).astype(np.uint8)
         # Close the small holes inside the foreground objects
-        # flow_mask_img = cv2.morphologyEx(flow_mask_img, cv2.MORPH_CLOSE, np.ones((21, 21),np.uint8)).astype(bool)
-        # flow_mask_img = scipy.ndimage.binary_fill_holes(flow_mask_img).astype(np.uint8)
+        flow_mask_img = cv2.morphologyEx(flow_mask_img, cv2.MORPH_CLOSE, np.ones((15, 15),np.uint8)).astype(np.uint8)
+        flow_mask_img = scipy.ndimage.binary_fill_holes(flow_mask_img).astype(np.uint8)
         flow_masks.append(Image.fromarray(flow_mask_img * 255))
         
         if mask_dilates > 0:
@@ -192,15 +192,15 @@ if __name__ == '__main__':
     parser.add_argument(
         '--width', type=int, default=-1, help='Width of the processing video.')
     parser.add_argument(
-        '--mask_dilation', type=int, default=4, help='Mask dilation for video and flow masking.')
+        '--mask_dilation', type=int, default=6, help='Mask dilation for video and flow masking.')
     parser.add_argument(
-        "--ref_stride", type=int, default=10, help='Stride of global reference frames.')
+        "--ref_stride", type=int, default=8, help='Stride of global reference frames.')
     parser.add_argument(
-        "--neighbor_length", type=int, default=10, help='Length of local neighboring frames.')
+        "--neighbor_length", type=int, default=15, help='Length of local neighboring frames.')
     parser.add_argument(
-        "--subvideo_length", type=int, default=80, help='Length of sub-video for long video inference.')
+        "--subvideo_length", type=int, default=120, help='Length of sub-video for long video inference.')
     parser.add_argument(
-        "--raft_iter", type=int, default=20, help='Iterations for RAFT inference.')
+        "--raft_iter", type=int, default=12, help='Iterations for RAFT inference.')
     parser.add_argument(
         '--mode', default='video_inpainting', choices=['video_inpainting', 'video_outpainting'], help="Modes: video_inpainting / video_outpainting")
     parser.add_argument(
@@ -308,7 +308,8 @@ if __name__ == '__main__':
         else:
             short_clip_len = 2
         
-        # use fp32 for RAFT
+        # use fp32 for RAFT - optimized memory management
+        torch.cuda.empty_cache()  # Clear cache before flow computation
         if frames.size(1) > short_clip_len:
             gt_flows_f_list, gt_flows_b_list = [], []
             for f in range(0, video_length, short_clip_len):
@@ -337,7 +338,8 @@ if __name__ == '__main__':
             model = model.half()
 
         
-        # ---- complete flow ----
+        # ---- complete flow ---- optimized processing
+        torch.cuda.empty_cache()  # Clear cache before flow completion
         flow_length = gt_flows_bi[0].size(1)
         if flow_length > args.subvideo_length:
             pred_flows_f, pred_flows_b = [], []
@@ -368,9 +370,10 @@ if __name__ == '__main__':
             torch.cuda.empty_cache()
             
 
-        # ---- image propagation ----
+        # ---- image propagation ---- optimized memory usage
+        torch.cuda.empty_cache()  # Clear cache before image propagation
         masked_frames = frames * (1 - masks_dilated)
-        subvideo_length_img_prop = min(100, args.subvideo_length) # ensure a minimum of 100 frames for image propagation
+        subvideo_length_img_prop = min(120, args.subvideo_length) # ensure a minimum of 120 frames for image propagation
         if video_length > subvideo_length_img_prop:
             updated_frames, updated_masks = [], []
             pad_len = 10
@@ -442,6 +445,8 @@ if __name__ == '__main__':
                 idx = neighbor_ids[i]
                 img = np.array(pred_img[i]).astype(np.uint8) * binary_masks[i] \
                     + ori_frames[idx] * (1 - binary_masks[i])
+                # Apply bilateral filter for smoother edges
+                img = cv2.bilateralFilter(img, 9, 75, 75)
                 if comp_frames[idx] is None:
                     comp_frames[idx] = img
                 else: 
