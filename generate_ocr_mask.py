@@ -9,11 +9,18 @@ import warnings
 warnings.filterwarnings("ignore")
 
 try:
-    from rapidocr_onnxruntime import RapidOCR
+    from rapidocr import RapidOCR
     RAPIDOCR_AVAILABLE = True
+    RAPIDOCR_NEW_VERSION = True
 except ImportError:
-    print("RapidOCR not installed. Please install with: pip install rapidocr-onnxruntime")
-    RAPIDOCR_AVAILABLE = False
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+        RAPIDOCR_AVAILABLE = True
+        RAPIDOCR_NEW_VERSION = False
+    except ImportError:
+        print("RapidOCR not installed. Please install with: pip install rapidocr-onnxruntime")
+        RAPIDOCR_AVAILABLE = False
+        RAPIDOCR_NEW_VERSION = False
 
 
 def imwrite(img, file_path, params=None, auto_mkdir=True):
@@ -192,22 +199,26 @@ def process_video_ocr_mask(input_path, output_path, confidence_threshold=0.5,
     
     # Initialize RapidOCR with optimizations
     try:
-        # Check GPU availability for RapidOCR
-        import onnxruntime as ort
-        providers = ['CPUExecutionProvider']
-        if use_gpu and 'CUDAExecutionProvider' in ort.get_available_providers():
-            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-            print("🚀 Using GPU acceleration for OCR")
+        if RAPIDOCR_NEW_VERSION:
+            # New version API (rapidocr)
+            print("💻 使用新版本 RapidOCR API")
+            ocr_engine = RapidOCR()
         else:
-            print("💻 Using CPU for OCR processing")
-        
-        # Initialize with optimized settings
-        ocr_engine = RapidOCR(
-            providers=providers,
+            # Old version API (rapidocr-onnxruntime)
+            print("💻 使用旧版本 RapidOCR API")
+            # Check GPU availability for RapidOCR
+            import onnxruntime as ort
+            providers = ['CPUExecutionProvider']
+            if use_gpu and 'CUDAExecutionProvider' in ort.get_available_providers():
+                providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+                print("🚀 Using GPU acceleration for OCR")
+            else:
+                print("💻 Using CPU for OCR processing")
             
-        )
+            # Initialize with optimized settings
+            ocr_engine = RapidOCR(providers=providers)
     except Exception as e:
-        print(f"Warning: GPU setup failed, falling back to CPU: {e}")
+        print(f"Warning: OCR setup failed, falling back to basic initialization: {e}")
         ocr_engine = RapidOCR()
     
     print("Loading video frames...")
@@ -241,111 +252,158 @@ def process_video_ocr_mask(input_path, output_path, confidence_threshold=0.5,
             
             # Perform OCR
             try:
-                result = ocr_engine(frame_cv2)
-                
-                if result is None or len(result) == 0:
-                    # No text detected, create empty mask
-                    mask_array = np.zeros((frame.size[1], frame.size[0]), dtype=np.uint8)
-                else:
-                    # Extract text boxes from OCR results with robust parsing
-                    text_boxes = []
-                    frame_text_count = 0
+                if RAPIDOCR_NEW_VERSION:
+                    # New API: result is TextDetOutput object
+                    result = ocr_engine(frame_cv2, use_det=True, use_cls=False, use_rec=False)
                     
-                    for item in result:
-                        if item is None:
-                            continue
+                    if result is None or not hasattr(result, 'boxes') or result.boxes is None or len(result.boxes) == 0:
+                        # No text detected, create empty mask
+                        mask_array = np.zeros((frame.size[1], frame.size[0]), dtype=np.uint8)
+                    else:
+                        # Extract text boxes from new API format
+                        text_boxes = []
+                        frame_text_count = 0
                         
-                        try:
-                            # Handle different RapidOCR output formats
-                            bbox, text, conf = None, None, None
-                            
-                            if isinstance(item, (list, tuple)):
-                                if len(item) == 3:
-                                    # Standard format: [bbox, text, confidence]
-                                    bbox, text, conf = item
-                                elif len(item) == 2:
-                                    # Format: [bbox, text] - assume high confidence
-                                    bbox, text = item
-                                    conf = 0.9
-                                elif len(item) >= 4:
-                                    # Extended format: take first 3 elements
-                                    bbox, text, conf = item[0], item[1], item[2]
-                                else:
-                                    # Unknown format, skip
-                                    continue
-                            else:
-                                # Single value or unknown format, skip
-                                continue
-                            
-                            # Validate extracted values
-                            if bbox is None or text is None:
-                                continue
-                            
-                            # Handle confidence value - ensure it's a float
-                            if conf is None:
-                                conf = 0.9  # Default confidence
-                            elif isinstance(conf, (list, tuple)):
-                                # If confidence is a list/tuple, take the first numeric value
-                                try:
-                                    conf = float(conf[0]) if len(conf) > 0 else 0.9
-                                except (ValueError, TypeError):
-                                    conf = 0.9
-                            elif not isinstance(conf, (int, float)):
-                                try:
-                                    conf = float(conf)
-                                except (ValueError, TypeError):
-                                    conf = 0.9
-                            
-                            # Filter by confidence threshold
-                            if conf < confidence_threshold:
-                                continue
-                            
-                            # Validate and convert text
-                            if isinstance(text, bytes):
-                                text = text.decode('utf-8', errors='ignore')
-                            text = str(text).strip()
-                            
-                            # Filter by text size (number of characters)
-                            if len(text) < min_text_size:
-                                continue
-                            
-                            # Validate bbox format
-                            if not isinstance(bbox, (list, tuple, np.ndarray)):
-                                continue
-                            
-                            # Convert bbox to expected format if needed
-                            if isinstance(bbox, np.ndarray):
-                                bbox = bbox.tolist()
-                            
-                            # Ensure bbox has correct structure
-                            if len(bbox) >= 4:
-                                # Check if it's already in the right format [[x1,y1], [x2,y2], ...]
-                                if all(isinstance(point, (list, tuple, np.ndarray)) and len(point) >= 2 for point in bbox[:4]):
-                                    text_boxes.append(bbox[:4])  # Take first 4 points
-                                else:
-                                    # Might be flat format [x1, y1, x2, y2, ...]
-                                    if len(bbox) >= 8:  # Need at least 8 values for 4 points
-                                        points = []
-                                        for i in range(0, min(8, len(bbox)), 2):
-                                            if i + 1 < len(bbox):
-                                                points.append([float(bbox[i]), float(bbox[i+1])])
-                                        if len(points) == 4:
-                                            text_boxes.append(points)
+                        boxes = result.boxes
+                        scores = result.scores if hasattr(result, 'scores') and result.scores is not None else None
+                        
+                        for i, bbox in enumerate(boxes):
+                            try:
+                                # Get confidence score
+                                conf = scores[i] if scores is not None and i < len(scores) else 0.9
                                 
-                                frame_text_count += 1
+                                # Filter by confidence threshold
+                                if conf < confidence_threshold:
+                                    continue
+                                
+                                # bbox is already in the correct format from new API
+                                # It should be shape (4, 2) - 4 points with x,y coordinates
+                                if isinstance(bbox, np.ndarray):
+                                    bbox = bbox.tolist()
+                                
+                                # Validate bbox format
+                                if len(bbox) >= 4 and all(len(point) >= 2 for point in bbox[:4]):
+                                    text_boxes.append(bbox[:4])
+                                    frame_text_count += 1
+                            
+                            except Exception as e:
+                                print(f"Warning: Failed to parse box {i} in frame {frame_idx}: {e}")
+                                continue
                         
-                        except Exception as e:
-                            # Log the problematic item for debugging but continue
-                            print(f"Warning: Failed to parse OCR item in frame {frame_idx}: {e}")
-                            print(f"Problematic item: {item}")
-                            continue
+                        total_text_regions += frame_text_count
+                        
+                        # Create mask from detected text boxes
+                        mask_array = create_text_mask(frame, text_boxes, 
+                                                   dilation_kernel_size=dilation_kernel, 
+                                                   margin=margin)
+                
+                else:
+                    # Old API: result is list of [bbox, text, confidence]
+                    result = ocr_engine(frame_cv2)
                     
-                    total_text_regions += frame_text_count
-                    
-                    # Create mask from detected text boxes
-                    mask_array = create_text_mask(frame, text_boxes, 
-                                               dilation_kernel_size=dilation_kernel, 
-                                               margin=margin)
+                    if result is None or len(result) == 0:
+                        # No text detected, create empty mask
+                        mask_array = np.zeros((frame.size[1], frame.size[0]), dtype=np.uint8)
+                    else:
+                        # Extract text boxes from OCR results with robust parsing
+                        text_boxes = []
+                        frame_text_count = 0
+                        
+                        for item in result:
+                            if item is None:
+                                continue
+                            
+                            try:
+                                # Handle different RapidOCR output formats
+                                bbox, text, conf = None, None, None
+                                
+                                if isinstance(item, (list, tuple)):
+                                    if len(item) == 3:
+                                        # Standard format: [bbox, text, confidence]
+                                        bbox, text, conf = item
+                                    elif len(item) == 2:
+                                        # Format: [bbox, text] - assume high confidence
+                                        bbox, text = item
+                                        conf = 0.9
+                                    elif len(item) >= 4:
+                                        # Extended format: take first 3 elements
+                                        bbox, text, conf = item[0], item[1], item[2]
+                                    else:
+                                        # Unknown format, skip
+                                        continue
+                                else:
+                                    # Single value or unknown format, skip
+                                    continue
+                                
+                                # Validate extracted values
+                                if bbox is None or text is None:
+                                    continue
+                                
+                                # Handle confidence value - ensure it's a float
+                                if conf is None:
+                                    conf = 0.9  # Default confidence
+                                elif isinstance(conf, (list, tuple)):
+                                    # If confidence is a list/tuple, take the first numeric value
+                                    try:
+                                        conf = float(conf[0]) if len(conf) > 0 else 0.9
+                                    except (ValueError, TypeError):
+                                        conf = 0.9
+                                elif not isinstance(conf, (int, float)):
+                                    try:
+                                        conf = float(conf)
+                                    except (ValueError, TypeError):
+                                        conf = 0.9
+                                
+                                # Filter by confidence threshold
+                                if conf < confidence_threshold:
+                                    continue
+                                
+                                # Validate and convert text
+                                if isinstance(text, bytes):
+                                    text = text.decode('utf-8', errors='ignore')
+                                text = str(text).strip()
+                                
+                                # Filter by text size (number of characters)
+                                if len(text) < min_text_size:
+                                    continue
+                                
+                                # Validate bbox format
+                                if not isinstance(bbox, (list, tuple, np.ndarray)):
+                                    continue
+                                
+                                # Convert bbox to expected format if needed
+                                if isinstance(bbox, np.ndarray):
+                                    bbox = bbox.tolist()
+                                
+                                # Ensure bbox has correct structure
+                                if len(bbox) >= 4:
+                                    # Check if it's already in the right format [[x1,y1], [x2,y2], ...]
+                                    if all(isinstance(point, (list, tuple, np.ndarray)) and len(point) >= 2 for point in bbox[:4]):
+                                        text_boxes.append(bbox[:4])  # Take first 4 points
+                                    else:
+                                        # Might be flat format [x1, y1, x2, y2, ...]
+                                        if len(bbox) >= 8:  # Need at least 8 values for 4 points
+                                            points = []
+                                            for j in range(0, min(8, len(bbox)), 2):
+                                                if j + 1 < len(bbox):
+                                                    points.append([float(bbox[j]), float(bbox[j+1])])
+                                            if len(points) == 4:
+                                                text_boxes.append(points)
+                                    
+                                    frame_text_count += 1
+                            
+                            except Exception as e:
+                                # Log the problematic item for debugging but continue
+                                print(f"Warning: Failed to parse OCR item in frame {frame_idx}: {e}")
+                                print(f"Problematic item: {item}")
+                                continue
+                        
+                        total_text_regions += frame_text_count
+                        
+                        # Create mask from detected text boxes
+                        mask_array = create_text_mask(frame, text_boxes, 
+                                                   dilation_kernel_size=dilation_kernel, 
+                                                   margin=margin)
             
             except Exception as e:
                 print(f"Error processing frame {frame_idx}: {e}")
