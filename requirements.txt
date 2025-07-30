@@ -1,16 +1,29 @@
+# Core PyTorch dependencies - compatible with CUDA 12.4
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Computer vision and image processing
+opencv-python
+scikit-image
+imageio-ffmpeg
+
+# Scientific computing
+numpy
+scipy
+matplotlib
+
+# Video processing
 av
+
+# Utility libraries
 addict
 einops
 future
-numpy
-scipy
-opencv-python
-matplotlib
-scikit-image
-torch>=1.7.1
-torchvision>=0.8.2
-imageio-ffmpeg
 pyyaml
 requests
 timm
 yapf
+
+# OCR functionality
+rapidocr-onnxruntime
+onnxruntime-gpu
