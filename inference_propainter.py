@@ -30,6 +30,28 @@ def imwrite(img, file_path, params=None, auto_mkdir=True):
     return cv2.imwrite(file_path, img, params)
 
 
+def analyze_mask_complexity(masks_dilated):
+    """Analyze mask complexity to adjust processing strategy"""
+    mask_stats = []
+    for i in range(masks_dilated.size(1)):
+        mask = masks_dilated[0, i, 0].cpu().numpy()
+        total_pixels = mask.shape[0] * mask.shape[1]
+        masked_pixels = np.sum(mask > 0.5)
+        mask_ratio = masked_pixels / total_pixels
+        
+        # Analyze connected components
+        _, num_components = cv2.connectedComponents((mask > 0.5).astype(np.uint8))
+        
+        mask_stats.append({
+            'frame_idx': i,
+            'mask_ratio': mask_ratio,
+            'num_components': num_components - 1,  # Subtract background
+            'is_complex': mask_ratio > 0.3 or num_components > 10
+        })
+    
+    return mask_stats
+
+
 # resize frames
 def resize_frames(frames, size=None):    
     if size is not None:
@@ -260,6 +282,15 @@ if __name__ == '__main__':
         fuse_img = mask_ * fuse_img + (1-mask_)*img
         masked_frame_for_save.append(fuse_img.astype(np.uint8))
 
+    # Analyze mask complexity for adaptive processing
+    print("Analyzing mask complexity...")
+    mask_stats = analyze_mask_complexity(masks_dilated)
+    complex_frames = [stat for stat in mask_stats if stat['is_complex']]
+    
+    if complex_frames:
+        print(f"Detected {len(complex_frames)} complex frames with large text areas")
+        print("Applying enhanced processing for better quality...")
+    
     frames_inp = [np.array(f).astype(np.uint8) for f in frames]
     frames = to_tensors()(frames).unsqueeze(0) * 2 - 1    
     flow_masks = to_tensors()(flow_masks).unsqueeze(0)
@@ -416,7 +447,7 @@ if __name__ == '__main__':
     else:
         ref_num = -1
     
-    # ---- feature propagation + transformer ----
+    # ---- feature propagation + transformer ---- with adaptive processing
     for f in tqdm(range(0, video_length, neighbor_stride)):
         neighbor_ids = [
             i for i in range(max(0, f - neighbor_stride),
@@ -432,8 +463,39 @@ if __name__ == '__main__':
             # 1.0 indicates mask
             l_t = len(neighbor_ids)
             
-            # pred_img = selected_imgs # results of image propagation
-            pred_img = model(selected_imgs, selected_pred_flows_bi, selected_masks, selected_update_masks, l_t)
+            # Check if current frames contain complex masks
+            current_frame_stats = [stat for stat in mask_stats if stat['frame_idx'] in neighbor_ids]
+            has_complex_masks = any(stat['is_complex'] for stat in current_frame_stats)
+            
+            if has_complex_masks:
+                # For complex masks (large text areas), use multi-step inpainting
+                print(f"Processing complex masks in frames {[stat['frame_idx'] for stat in current_frame_stats if stat['is_complex']]}")
+                
+                # Step 1: Use propagation results as baseline
+                masked_selected = selected_imgs * (1 - selected_masks)
+                coarse_result = masked_selected
+                
+                # Step 2: Light transformer refinement
+                transformer_result = model(selected_imgs, selected_pred_flows_bi, selected_masks, selected_update_masks, l_t)
+                
+                # Step 3: Adaptive blending based on mask density
+                pred_img = torch.zeros_like(transformer_result)
+                
+                for idx, frame_idx in enumerate(neighbor_ids):
+                    current_stat = next((stat for stat in current_frame_stats if stat['frame_idx'] == frame_idx), None)
+                    if current_stat and current_stat['is_complex']:
+                        # For very dense text areas, rely more on propagation
+                        if current_stat['mask_ratio'] > 0.4:
+                            blend_ratio = 0.2  # 20% transformer, 80% propagation
+                        else:
+                            blend_ratio = 0.35  # 35% transformer, 65% propagation
+                        
+                        pred_img[idx] = blend_ratio * transformer_result[idx] + (1 - blend_ratio) * coarse_result[idx]
+                    else:
+                        pred_img[idx] = transformer_result[idx]
+            else:
+                # Normal processing for simple masks
+                pred_img = model(selected_imgs, selected_pred_flows_bi, selected_masks, selected_update_masks, l_t)
             
             pred_img = pred_img.view(-1, 3, h, w)
 
@@ -445,12 +507,35 @@ if __name__ == '__main__':
                 idx = neighbor_ids[i]
                 img = np.array(pred_img[i]).astype(np.uint8) * binary_masks[i] \
                     + ori_frames[idx] * (1 - binary_masks[i])
-                # Apply bilateral filter for smoother edges
-                img = cv2.bilateralFilter(img, 9, 75, 75)
+                
+                # Apply different post-processing based on mask complexity
+                current_stat = next((stat for stat in mask_stats if stat['frame_idx'] == idx), None)
+                if current_stat and current_stat['is_complex']:
+                    # For complex masks, apply adaptive post-processing
+                    if current_stat['mask_ratio'] > 0.4:
+                        # Very large text areas - use strong bilateral filter
+                        img = cv2.bilateralFilter(img, 21, 150, 150)
+                        # Add guided filter for better texture preservation
+                        img = cv2.edgePreservingFilter(img, flags=1, sigma_s=60, sigma_r=0.4)
+                    elif current_stat['mask_ratio'] > 0.25:
+                        # Moderate text areas - balanced filtering
+                        img = cv2.bilateralFilter(img, 15, 100, 100)
+                        img = cv2.GaussianBlur(img, (3, 3), 0.8)
+                    else:
+                        # Small complex areas - light smoothing
+                        img = cv2.bilateralFilter(img, 9, 75, 75)
+                else:
+                    # Standard bilateral filter for simple masks
+                    img = cv2.bilateralFilter(img, 9, 75, 75)
+                
                 if comp_frames[idx] is None:
                     comp_frames[idx] = img
                 else: 
-                    comp_frames[idx] = comp_frames[idx].astype(np.float32) * 0.5 + img.astype(np.float32) * 0.5
+                    # For complex frames, use more conservative blending
+                    if current_stat and current_stat['is_complex']:
+                        comp_frames[idx] = comp_frames[idx].astype(np.float32) * 0.7 + img.astype(np.float32) * 0.3
+                    else:
+                        comp_frames[idx] = comp_frames[idx].astype(np.float32) * 0.5 + img.astype(np.float32) * 0.5
                     
                 comp_frames[idx] = comp_frames[idx].astype(np.uint8)
         

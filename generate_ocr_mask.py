@@ -85,8 +85,8 @@ def read_video_with_opencv(video_path):
     return frames, fps
 
 
-def create_text_mask(image, text_boxes, dilation_kernel_size=5, margin=10):
-    """Create mask from OCR text detection results with robust error handling"""
+def create_text_mask(image, text_boxes, dilation_kernel_size=5, margin=10, edge_expansion=5):
+    """Create mask from OCR text detection results with enhanced edge coverage"""
     # Convert PIL image to numpy array
     if isinstance(image, Image.Image):
         img_array = np.array(image)
@@ -110,20 +110,34 @@ def create_text_mask(image, text_boxes, dilation_kernel_size=5, margin=10):
                 # box format: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
                 points = box
                 if isinstance(points[0], (list, tuple, np.ndarray)):
-                    # Flatten coordinates and add margin
+                    # Flatten coordinates and add enhanced margin
                     coords = []
                     for point in points[:4]:  # Only use first 4 points
                         if len(point) >= 2:
                             x, y = float(point[0]), float(point[1])
-                            # Apply margin and clamp to image bounds
-                            x = max(0, min(width-1, x - margin))
-                            y = max(0, min(height-1, y - margin))
-                            coords.extend([x, y])
+                            # Apply enhanced margin and clamp to image bounds
+                            x_expanded = max(0, min(width-1, x - margin - edge_expansion))
+                            y_expanded = max(0, min(height-1, y - margin - edge_expansion))
+                            coords.extend([x_expanded, y_expanded])
                     
                     # Draw filled polygon if we have enough coordinates
                     if len(coords) >= 8:  # At least 4 points (8 coordinates)
                         try:
                             draw.polygon(coords, fill=255)
+                            
+                            # Add additional bounding rectangle for extra coverage
+                            x_coords = coords[0::2]
+                            y_coords = coords[1::2]
+                            min_x, max_x = min(x_coords), max(x_coords)
+                            min_y, max_y = min(y_coords), max(y_coords)
+                            
+                            # Expand bounding rectangle even more
+                            min_x = max(0, min_x - edge_expansion)
+                            min_y = max(0, min_y - edge_expansion)
+                            max_x = min(width-1, max_x + edge_expansion)
+                            max_y = min(height-1, max_y + edge_expansion)
+                            
+                            draw.rectangle([min_x, min_y, max_x, max_y], fill=255)
                         except Exception as e:
                             # If polygon fails, try drawing a bounding rectangle
                             try:
@@ -133,10 +147,10 @@ def create_text_mask(image, text_boxes, dilation_kernel_size=5, margin=10):
                                 min_y, max_y = min(y_coords), max(y_coords)
                                 
                                 # Add additional margin for rectangle
-                                min_x = max(0, min_x - margin)
-                                min_y = max(0, min_y - margin)
-                                max_x = min(width-1, max_x + margin)
-                                max_y = min(height-1, max_y + margin)
+                                min_x = max(0, min_x - margin - edge_expansion)
+                                min_y = max(0, min_y - margin - edge_expansion)
+                                max_x = min(width-1, max_x + margin + edge_expansion)
+                                max_y = min(height-1, max_y + margin + edge_expansion)
                                 
                                 draw.rectangle([min_x, min_y, max_x, max_y], fill=255)
                             except Exception:
@@ -148,14 +162,27 @@ def create_text_mask(image, text_boxes, dilation_kernel_size=5, margin=10):
                         for i in range(0, min(8, len(points)), 2):
                             if i + 1 < len(points):
                                 x, y = float(points[i]), float(points[i+1])
-                                # Apply margin and clamp to image bounds
-                                x = max(0, min(width-1, x - margin))
-                                y = max(0, min(height-1, y - margin))
+                                # Apply enhanced margin and clamp to image bounds
+                                x = max(0, min(width-1, x - margin - edge_expansion))
+                                y = max(0, min(height-1, y - margin - edge_expansion))
                                 coords.extend([x, y])
                         
                         if len(coords) >= 8:
                             try:
                                 draw.polygon(coords, fill=255)
+                                
+                                # Add bounding rectangle for extra coverage
+                                x_coords = coords[0::2]
+                                y_coords = coords[1::2]
+                                min_x, max_x = min(x_coords), max(x_coords)
+                                min_y, max_y = min(y_coords), max(y_coords)
+                                
+                                min_x = max(0, min_x - edge_expansion)
+                                min_y = max(0, min_y - edge_expansion)
+                                max_x = min(width-1, max_x + edge_expansion)
+                                max_y = min(height-1, max_y + edge_expansion)
+                                
+                                draw.rectangle([min_x, min_y, max_x, max_y], fill=255)
                             except Exception:
                                 # Fallback to bounding rectangle
                                 x_coords = coords[0::2]
@@ -163,10 +190,10 @@ def create_text_mask(image, text_boxes, dilation_kernel_size=5, margin=10):
                                 min_x, max_x = min(x_coords), max(x_coords)
                                 min_y, max_y = min(y_coords), max(y_coords)
                                 
-                                min_x = max(0, min_x - margin)
-                                min_y = max(0, min_y - margin)
-                                max_x = min(width-1, max_x + margin)
-                                max_y = min(height-1, max_y + margin)
+                                min_x = max(0, min_x - margin - edge_expansion)
+                                min_y = max(0, min_y - margin - edge_expansion)
+                                max_x = min(width-1, max_x + margin + edge_expansion)
+                                max_y = min(height-1, max_y + edge_expansion)
                                 
                                 draw.rectangle([min_x, min_y, max_x, max_y], fill=255)
         except Exception as e:
@@ -174,16 +201,35 @@ def create_text_mask(image, text_boxes, dilation_kernel_size=5, margin=10):
             print(f"Warning: Failed to draw text box: {e}")
             continue
     
-    # Convert to numpy array for dilation
+    # Convert to numpy array for enhanced dilation
     mask_array = np.array(mask)
     
-    # Apply dilation to expand text regions
+    # Apply enhanced dilation to expand text regions
     if dilation_kernel_size > 0:
         try:
-            kernel = np.ones((dilation_kernel_size, dilation_kernel_size), np.uint8)
-            mask_array = cv2.dilate(mask_array, kernel, iterations=1)
+            # Calculate text density for adaptive dilation
+            total_pixels = mask_array.shape[0] * mask_array.shape[1]
+            text_pixels = np.sum(mask_array > 127)
+            text_ratio = text_pixels / total_pixels
+            
+            # Use larger kernel and more iterations for dense text areas
+            if text_ratio > 0.25:  # Large text area detected
+                kernel_size = max(dilation_kernel_size + 4, 12)
+                iterations = 3
+            else:
+                kernel_size = dilation_kernel_size + 2
+                iterations = 2
+            
+            kernel = np.ones((kernel_size, kernel_size), np.uint8)
+            mask_array = cv2.dilate(mask_array, kernel, iterations=iterations)
+            
+            # Apply morphological closing to fill gaps
+            closing_kernel_size = max(dilation_kernel_size + 2, 8) if text_ratio > 0.25 else dilation_kernel_size
+            closing_kernel = np.ones((closing_kernel_size, closing_kernel_size), np.uint8)
+            mask_array = cv2.morphologyEx(mask_array, cv2.MORPH_CLOSE, closing_kernel)
+            
         except Exception as e:
-            print(f"Warning: Dilation failed: {e}")
+            print(f"Warning: Enhanced dilation failed: {e}")
     
     return mask_array
 
@@ -292,10 +338,12 @@ def process_video_ocr_mask(input_path, output_path, confidence_threshold=0.5,
                         
                         total_text_regions += frame_text_count
                         
-                        # Create mask from detected text boxes
+                        # Create mask from detected text boxes with enhanced edge coverage
+                        # Increase edge expansion for better coverage of large text areas
+                        edge_exp = 12 if frame_text_count > 5 else 8
                         mask_array = create_text_mask(frame, text_boxes, 
                                                    dilation_kernel_size=dilation_kernel, 
-                                                   margin=margin)
+                                                   margin=margin, edge_expansion=edge_exp)
                 
                 else:
                     # Old API: result is list of [bbox, text, confidence]
@@ -400,10 +448,12 @@ def process_video_ocr_mask(input_path, output_path, confidence_threshold=0.5,
                         
                         total_text_regions += frame_text_count
                         
-                        # Create mask from detected text boxes
+                        # Create mask from detected text boxes with enhanced edge coverage
+                        # Increase edge expansion for better coverage of large text areas
+                        edge_exp = 12 if frame_text_count > 5 else 8
                         mask_array = create_text_mask(frame, text_boxes, 
                                                    dilation_kernel_size=dilation_kernel, 
-                                                   margin=margin)
+                                                   margin=margin, edge_expansion=edge_exp)
             
             except Exception as e:
                 print(f"Error processing frame {frame_idx}: {e}")
@@ -487,12 +537,12 @@ def main():
         help='OCR confidence threshold (0.0-1.0). Default: 0.5'
     )
     parser.add_argument(
-        '--dilation', type=int, default=5,
-        help='Dilation kernel size for expanding text regions. Default: 5'
+        '--dilation', type=int, default=8,
+        help='Dilation kernel size for expanding text regions. Default: 8'
     )
     parser.add_argument(
-        '--margin', type=int, default=10,
-        help='Margin around detected text boxes. Default: 10'
+        '--margin', type=int, default=15,
+        help='Margin around detected text boxes. Default: 15'
     )
     parser.add_argument(
         '--sample_rate', type=int, default=1,
