@@ -197,27 +197,98 @@ def process_video_ocr_mask(input_path, output_path, confidence_threshold=0.5,
                     # No text detected, create empty mask
                     mask_array = np.zeros((frame.size[1], frame.size[0]), dtype=np.uint8)
                 else:
-                    # Extract text boxes from OCR results
+                    # Extract text boxes from OCR results with robust parsing
                     text_boxes = []
                     frame_text_count = 0
                     
                     for item in result:
-                        if item is None or len(item) < 3:
+                        if item is None:
                             continue
                         
-                        # RapidOCR format: [bbox, text, confidence]
-                        bbox, text, conf = item
+                        try:
+                            # Handle different RapidOCR output formats
+                            bbox, text, conf = None, None, None
+                            
+                            if isinstance(item, (list, tuple)):
+                                if len(item) == 3:
+                                    # Standard format: [bbox, text, confidence]
+                                    bbox, text, conf = item
+                                elif len(item) == 2:
+                                    # Format: [bbox, text] - assume high confidence
+                                    bbox, text = item
+                                    conf = 0.9
+                                elif len(item) >= 4:
+                                    # Extended format: take first 3 elements
+                                    bbox, text, conf = item[0], item[1], item[2]
+                                else:
+                                    # Unknown format, skip
+                                    continue
+                            else:
+                                # Single value or unknown format, skip
+                                continue
+                            
+                            # Validate extracted values
+                            if bbox is None or text is None:
+                                continue
+                            
+                            # Handle confidence value - ensure it's a float
+                            if conf is None:
+                                conf = 0.9  # Default confidence
+                            elif isinstance(conf, (list, tuple)):
+                                # If confidence is a list/tuple, take the first numeric value
+                                try:
+                                    conf = float(conf[0]) if len(conf) > 0 else 0.9
+                                except (ValueError, TypeError):
+                                    conf = 0.9
+                            elif not isinstance(conf, (int, float)):
+                                try:
+                                    conf = float(conf)
+                                except (ValueError, TypeError):
+                                    conf = 0.9
+                            
+                            # Filter by confidence threshold
+                            if conf < confidence_threshold:
+                                continue
+                            
+                            # Validate and convert text
+                            if isinstance(text, bytes):
+                                text = text.decode('utf-8', errors='ignore')
+                            text = str(text).strip()
+                            
+                            # Filter by text size (number of characters)
+                            if len(text) < min_text_size:
+                                continue
+                            
+                            # Validate bbox format
+                            if not isinstance(bbox, (list, tuple, np.ndarray)):
+                                continue
+                            
+                            # Convert bbox to expected format if needed
+                            if isinstance(bbox, np.ndarray):
+                                bbox = bbox.tolist()
+                            
+                            # Ensure bbox has correct structure
+                            if len(bbox) >= 4:
+                                # Check if it's already in the right format [[x1,y1], [x2,y2], ...]
+                                if all(isinstance(point, (list, tuple, np.ndarray)) and len(point) >= 2 for point in bbox[:4]):
+                                    text_boxes.append(bbox[:4])  # Take first 4 points
+                                else:
+                                    # Might be flat format [x1, y1, x2, y2, ...]
+                                    if len(bbox) >= 8:  # Need at least 8 values for 4 points
+                                        points = []
+                                        for i in range(0, min(8, len(bbox)), 2):
+                                            if i + 1 < len(bbox):
+                                                points.append([float(bbox[i]), float(bbox[i+1])])
+                                        if len(points) == 4:
+                                            text_boxes.append(points)
+                                
+                                frame_text_count += 1
                         
-                        # Filter by confidence threshold
-                        if conf < confidence_threshold:
+                        except Exception as e:
+                            # Log the problematic item for debugging but continue
+                            print(f"Warning: Failed to parse OCR item in frame {frame_idx}: {e}")
+                            print(f"Problematic item: {item}")
                             continue
-                        
-                        # Filter by text size (number of characters)
-                        if len(str(text).strip()) < min_text_size:
-                            continue
-                        
-                        text_boxes.append(bbox)
-                        frame_text_count += 1
                     
                     total_text_regions += frame_text_count
                     
